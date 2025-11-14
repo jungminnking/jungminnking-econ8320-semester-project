@@ -12,193 +12,173 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ================================================================
+# US Labor Statistics Dashboard — Jungmin Hwang (Semester Project)
+# ================================================================
+
+import os
+from pathlib import Path
+from datetime import datetime
+import pandas as pd
 import streamlit as st
+import plotly.express as px
 from streamlit.logger import get_logger
 
 LOGGER = get_logger(__name__)
 
+# -----------------------------
+# Data file configuration
+# -----------------------------
+DATA_PATH = Path("data") / "bls_timeseries.csv"
+META_PATH = Path("data") / "_meta.txt"
 
+# -----------------------------
+# BLS Series Configuration
+# -----------------------------
+SERIES = {
+    # Employment (Monthly, SA)
+    "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
+    "CES0000000001": {"section": "Employment", "name": "Total Nonfarm Employment (Thousands, SA)", "freq": "M"},
+    "LNS14000000": {"section": "Employment", "name": "Unemployment Rate (% SA)", "freq": "M"},
+    "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
+    "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
+
+    # Productivity (Quarterly)
+    # Corrected ID (previously PRS85006092 -> PRS85006093)
+    "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business Productivity (Q/Q %)", "freq": "Q"},
+
+    # Price Index (Monthly, NSA)
+    "CUUR0000SA0": {"section": "Price Index", "name": "CPI-U All Items (NSA, 1982–84=100)", "freq": "M"},
+
+    # Compensation (Quarterly, NSA)
+    # Corrected ID (previously CIU1010000000000A -> CIU1010000000000I)
+    "CIU1010000000000I": {"section": "Compensation", "name": "Employment Cost Index — Total Compensation, Private Industry (12m % chg)", "freq": "Q"},
+}
+
+SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
+
+
+# -----------------------------
+# Helper functions
+# -----------------------------
+@st.cache_data
+def load_data() -> pd.DataFrame:
+    """Load pre-collected dataset."""
+    if not DATA_PATH.exists():
+        return pd.DataFrame(columns=["series_id", "date", "value", "footnotes"])
+    df = pd.read_csv(DATA_PATH, parse_dates=["date"])
+    df = df[df["series_id"].isin(SERIES.keys())]
+    return df
+
+@st.cache_data
+def load_meta() -> dict:
+    """Read metadata from _meta.txt."""
+    meta = {"last_updated_utc": "unknown"}
+    if META_PATH.exists():
+        with open(META_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    meta[k] = v
+    return meta
+
+def kpi(df: pd.DataFrame, sid: str, label: str, fmt: str):
+    """Display KPI metric for latest vs previous period."""
+    s = df[df.series_id == sid].sort_values("date")
+    if s.empty:
+        st.metric(label, "—")
+        return
+    last = s.iloc[-1]
+    prev = s.iloc[-2] if len(s) > 1 else None
+    delta = (last.value - prev.value) if prev is not None else None
+    st.metric(label, fmt.format(last.value), None if delta is None else fmt.format(delta))
+
+def plot_lines(df: pd.DataFrame, sids: list[str], title: str, ylab: str = None, years_back: int = 5):
+    """Plot multiple time series lines."""
+    if df.empty or not sids:
+        st.info("No data to plot yet.")
+        return
+    min_date = pd.Timestamp.today() - pd.DateOffset(years=years_back)
+    dfp = df[df.series_id.isin(sids)].copy()
+    dfp = dfp[dfp["date"] >= min_date]
+    dfp["series_name"] = dfp.series_id.map(lambda x: SERIES.get(x, {}).get("name", x))
+
+    fig = px.line(dfp, x="date", y="value", color="series_name", markers=False, title=title)
+    if ylab:
+        fig.update_yaxes(title_text=ylab)
+    fig.update_layout(height=480, legend_title_text="Series")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# -----------------------------
+# Streamlit app
+# -----------------------------
 def run():
-    st.set_page_config(
-        page_title="Hello",
-        page_icon="👋",
-    )
+    st.set_page_config(page_title="US Labor Statistics Dashboard", page_icon="📊", layout="wide")
+    st.title("US Labor Statistics Dashboard — U.S. Bureau of Labor Statistics")
 
-    st.write("# Welcome to Streamlit! 👋")
+    st.sidebar.success("Use the tabs to explore data.")
+    st.sidebar.caption("Data source: BLS Public API • Updates monthly via GitHub Actions")
 
-    st.sidebar.success("Select a demo above.")
+    df = load_data()
+    meta = load_meta()
 
-    st.markdown(
-        """
-        Streamlit is an open-source app framework built specifically for
-        Machine Learning and Data Science projects.
-        **👈 Select a demo from the sidebar** to see some examples
-        of what Streamlit can do!
-        ### Want to learn more?
-        - Check out [streamlit.io](https://streamlit.io)
-        - Jump into our [documentation](https://docs.streamlit.io)
-        - Ask a question in our [community
-          forums](https://discuss.streamlit.io)
-        ### See more complex demos
-        - Use a neural net to [analyze the Udacity Self-driving Car Image
-          Dataset](https://github.com/streamlit/demo-self-driving)
-        - Explore a [New York City rideshare dataset](https://github.com/streamlit/demo-uber-nyc-pickups)
-    """
-    )
+    st.caption(f"**Last dataset update (UTC):** {meta.get('last_updated_utc', 'unknown')}")
 
+    if df.empty:
+        st.warning("⚠️ No dataset found. Run `python src/update_dataset.py` or trigger GitHub Action to create `data/bls_timeseries.csv`.")
+        st.stop()
 
+    # -----------------------------
+    # Headline KPIs (Employment)
+    # -----------------------------
+    st.subheader("Key Employment Indicators")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1: kpi(df, "CES0000000001", "Nonfarm Payrolls (k)", "{:,.0f}")
+    with col2: kpi(df, "LNS14000000", "Unemployment Rate (%)", "{:.1f}")
+    with col3: kpi(df, "LNS12000000", "Civilian Employment (k)", "{:,.0f}")
+    with col4: kpi(df, "CES0500000002", "Avg Weekly Hours", "{:.1f}")
+    with col5: kpi(df, "CES0500000003", "Avg Hourly Earnings ($)", "{:.2f}")
+
+    # Tabs by section
+    tabs = st.tabs(SECTIONS)
+
+    # Employment
+    with tabs[0]:
+        st.subheader("Employment Trends")
+        years = st.slider("Show last N years", 1, 15, 5, key="years_emp")
+        sids = ["LNS12000000", "CES0000000001", "LNS14000000", "CES0500000002", "CES0500000003"]
+        plot_lines(df, sids, "Employment Indicators", years_back=years)
+
+    # Productivity
+    with tabs[1]:
+        st.subheader("Productivity (Quarterly)")
+        years = st.slider("Show last N years", 1, 15, 10, key="years_prod")
+        plot_lines(df, ["PRS85006093"], "Output per Hour — Nonfarm Business (Q/Q %)", "Q/Q %", years_back=years)
+
+    # Price Index
+    with tabs[2]:
+        st.subheader("Price Index — CPI-U")
+        years = st.slider("Show last N years", 1, 20, 10, key="years_cpi")
+        plot_lines(df, ["CUUR0000SA0"], "CPI-U All Items (NSA, 1982–84=100)", "Index", years_back=years)
+
+        cpi = df[df.series_id == "CUUR0000SA0"].set_index("date").sort_index()
+        cpi["YoY %"] = cpi["value"].pct_change(12) * 100
+        cpi = cpi.reset_index()
+        cpi = cpi[cpi["date"] >= (pd.Timestamp.today() - pd.DateOffset(years=years))]
+        fig = px.line(cpi, x="date", y="YoY %", title="CPI-U — 12-Month % Change")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Compensation
+    with tabs[3]:
+        st.subheader("Compensation (ECI)")
+        years = st.slider("Show last N years", 1, 20, 10, key="years_eci")
+        plot_lines(df, ["CIU1010000000000I"], "Employment Cost Index — Total Compensation (12m % chg)", "%", years_back=years)
+
+    st.caption("Built with Streamlit • Data via BLS API • Updated automatically once per month.")
+
+# -----------------------------
+# Entrypoint
+# -----------------------------
 if __name__ == "__main__":
     run()
-
-
-
-
-import pandas as pd
-import requests
-import matplotlib.pyplot as plt
-from datetime import datetime
-from pathlib import Path
-
-%matplotlib inline
-plt.rcParams['figure.figsize'] = (10, 5)
-plt.rcParams['axes.grid'] = True
-print('Pandas:', pd.__version__)
-
-def series_to_frame(series_payload):
-    rows = []
-    sid = series_payload["seriesID"]
-    for item in series_payload["data"]:
-        period = item.get("period")
-        if not period or not period.startswith('M') or period == 'M13':
-            continue
-        year = int(item["year"]) 
-        month = int(period[1:])
-        date = pd.Timestamp(year=year, month=month, day=1)
-        value = float(item["value"])
-        rows.append({"series_id": sid, "date": date, "value": value})
-    return pd.DataFrame(rows).sort_values("date")
-
-# Take the first series from the API result and preview
-first_series = api["Results"]["series"][0]
-df_test = series_to_frame(first_series)
-df_test.head()
-
-
-plt.figure()
-plt.plot(df_test['date'], df_test['value'], marker='o')
-plt.title(f"{df_test['series_id'].iloc[0]} — sample from BLS API")
-plt.xlabel('Date')
-plt.ylabel('Value')
-plt.show()
-
-def fetch_census_data(year, month):
-    url = "https://api.census.gov/data/"
-    
-    https://api.bls.gov/publicAPI/v2/timeseries/data/
-
-    year_inp = f"{year}/"
-    data_set = "cps/basic/"
-    month_inp = f"{month}"
-    info_grab = "?get=CBSA,PEERNLAB,HEFAMINC,HETENURE,HRHTYPE,PEEDUCA,PRFTLF,PTERNH1O"
-    full_url = url + year_inp + data_set + month_inp + info_grab
-    response = requests.get(full_url)
-    print(full_url)
-    if response.status_code == 200:
-        data = response.json()
-        if data:
-            columns = data[0]
-            rows = data[1:]
-            df = pd.DataFrame(rows, columns=columns)
-            df['Year'] = year
-            df['Month'] = month
-
-            # Drop rows with missing values in the 'CBSA' column
-            df = df.dropna(subset=['CBSA'])
-
-            # Convert 'CBSA' column to float
-            df = df[df['CBSA'].astype(str).str.strip().replace('', '0').astype(float) > 10000]
-
-            # Map CBSA codes to metro area names
-            df["Metro Area"] = df["CBSA"].map(metro_area_mapping)
-
-            # Rename 'CBSA' column to 'GTCBSA'
-            df.rename(columns={'CBSA': 'GTCBSA'}, inplace=True)
-            df['PTERNH1O'] = pd.to_numeric(df['PTERNH1O'], errors='coerce')
-            df = df[df["PEERNLAB"] != -1]
-            df = df[df["PTERNH1O"].between(0.0, 99.99)]  # Filtering within the specified range
-            return df
-        else:
-            print("No data found for", year, month)
-            return None
-    else:
-        print("Failed to fetch data for", year, month)
-        return None
-
-def update_data(csv_path):
-    latest_year = 0
-    latest_month = 0
-#check the csv for the latest month and year
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        latest_year = df['Year'].max()
-        latest_month = df[df['Year'] == latest_year]['Month'].max()
-
-    print("Latest Year:", latest_year)
-    print("Latest Month:", latest_month)
-#pull current month and year
-    now = datetime.now()
-    current_year = now.year
-    current_month = now.strftime("%b").lower()
-#compare csv month and year with latest month and year
-    for year in range(latest_year, current_year + 1):
-        start_month = latest_month if year == latest_year else "jan"
-        end_month = current_month if year == current_year else "dec"
-        for month in get_months(start_month, end_month):
-            df = fetch_census_data(year, month)
-            if df is not None: #if the check pulled a year and month then proceed
-                with open(csv_path, 'a') as f:
-                    df.to_csv(f, header=f.tell()==0, index=False)
-                print(f"Data for {year}-{month} fetched and CSV updated successfully!")
-            else:
-                print(f"Failed to fetch data for {year}-{month}")
-
-def get_months(start_month, end_month):
-    months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-    start_index = months.index(start_month)
-    end_index = months.index(end_month)
-    return months[start_index:end_index+1]
-
-def main():
-    csv_path = "CENSUS_CPS_DATA.csv"
-    update_data(csv_path)
-
-if __name__ == "__main__":
-    main()
-
-
-{
-   "status":"REQUEST_SUCCEEDED",
-   "responseTime":253,
-   "message":[],
-   "Results": {
-      "series": [
-         {
-            "seriesID":"LAUCN040010000000005",
-            "data":[
-             {
-                "year": "2013",
-                "period": "M11",
-                "periodName": "November",
-                "latest": "true",
-                "value": "16393",
-                "footnotes": [
-                   {
-                     "code": "P",
-                     "text": "Preliminary."
-                   }
-                ]
-            }]
-      ]
-   }
-}
-    
