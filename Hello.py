@@ -1,184 +1,177 @@
-# Copyright (c) Streamlit Inc. (2018-2022) Snowflake Inc. (2022)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# ================================================================
-# US Labor Statistics Dashboard — Jungmin Hwang (Semester Project)
-# ================================================================
+# ===========================================================
+# US Labor Dashboard — Exploration (v2)
+# ===========================================================
+# Jungmin Hwang
+# -----------------------------------------------------------
+# Features:
+# - Correct BLS series IDs (PRS85006093, CIU1010000000000I)
+# - Keeps quarterly data (M03/M06/M09/M12)
+# - Fetches data from BLS API
+# - Saves unified CSV for Streamlit dashboard
+# - Visualizes Employment, Productivity, CPI, and ECI
+# ===========================================================
 
 import os
-from pathlib import Path
-from datetime import datetime
+import json
+import requests
 import pandas as pd
-import streamlit as st
-import plotly.express as px
-from streamlit.logger import get_logger
+import matplotlib.pyplot as plt
+from datetime import datetime
+from pathlib import Path
 
-LOGGER = get_logger(__name__)
+# Plot settings
+%matplotlib inline
+plt.rcParams["figure.figsize"] = (11, 5)
+plt.rcParams["axes.grid"] = True
+pd.set_option("display.float_format", lambda x: f"{x:,.3f}")
 
-# -----------------------------
-# Data file configuration
-# -----------------------------
-DATA_PATH = Path("data") / "bls_timeseries.csv"
-META_PATH = Path("data") / "_meta.txt"
+START_YEAR = 2006
+END_YEAR = datetime.utcnow().year
+print("Pandas", pd.__version__, "| Years", START_YEAR, "→", END_YEAR)
 
-# -----------------------------
-# BLS Series Configuration
-# -----------------------------
+# ===========================================================
+# 1. BLS Series Configuration
+# ===========================================================
 SERIES = {
-    # Employment (Monthly, SA)
+    # Employment (Monthly)
     "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
     "CES0000000001": {"section": "Employment", "name": "Total Nonfarm Employment (Thousands, SA)", "freq": "M"},
     "LNS14000000": {"section": "Employment", "name": "Unemployment Rate (% SA)", "freq": "M"},
     "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
     "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
 
-    # Productivity (Quarterly)
-    # Corrected ID (previously PRS85006092 -> PRS85006093)
-    "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business Productivity (Q/Q %)", "freq": "Q"},
+    # Productivity (Quarterly, SA)
+    "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)", "freq": "Q"},
 
     # Price Index (Monthly, NSA)
     "CUUR0000SA0": {"section": "Price Index", "name": "CPI-U All Items (NSA, 1982–84=100)", "freq": "M"},
 
     # Compensation (Quarterly, NSA)
-    # Corrected ID (previously CIU1010000000000A -> CIU1010000000000I)
-    "CIU1010000000000I": {"section": "Compensation", "name": "Employment Cost Index — Total Compensation, Private Industry (12m % chg)", "freq": "Q"},
+    "CIU1010000000000I": {"section": "Compensation", "name": "ECI — Total Compensation, Private Industry (12m % chg)", "freq": "Q"},
 }
 
-SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
+# ===========================================================
+# 2. Fetch from BLS API
+# ===========================================================
+BLS_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+
+class BLSError(Exception):
+    pass
+
+def fetch_bls_timeseries(series_ids, start_year, end_year):
+    """Fetch data from BLS API for multiple series."""
+    payload = {
+        "seriesid": series_ids,
+        "startyear": str(start_year),
+        "endyear": str(end_year),
+    }
+    key = os.getenv("BLS_API_KEY")
+    if key:
+        payload["registrationkey"] = key
+
+    r = requests.post(BLS_URL, json=payload, timeout=60)
+    if r.status_code != 200:
+        raise BLSError(f"HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    if data.get("status") != "REQUEST_SUCCEEDED":
+        raise BLSError(f"BLS API error: {json.dumps(data)[:300]}")
+    return data
 
 
-# -----------------------------
-# Helper functions
-# -----------------------------
-@st.cache_data
-def load_data() -> pd.DataFrame:
-    """Load pre-collected dataset."""
-    if not DATA_PATH.exists():
-        return pd.DataFrame(columns=["series_id", "date", "value", "footnotes"])
-    df = pd.read_csv(DATA_PATH, parse_dates=["date"])
-    df = df[df["series_id"].isin(SERIES.keys())]
-    return df
-
-@st.cache_data
-def load_meta() -> dict:
-    """Read metadata from _meta.txt."""
-    meta = {"last_updated_utc": "unknown"}
-    if META_PATH.exists():
-        with open(META_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                if "=" in line:
-                    k, v = line.strip().split("=", 1)
-                    meta[k] = v
-    return meta
-
-def kpi(df: pd.DataFrame, sid: str, label: str, fmt: str):
-    """Display KPI metric for latest vs previous period."""
-    s = df[df.series_id == sid].sort_values("date")
-    if s.empty:
-        st.metric(label, "—")
-        return
-    last = s.iloc[-1]
-    prev = s.iloc[-2] if len(s) > 1 else None
-    delta = (last.value - prev.value) if prev is not None else None
-    st.metric(label, fmt.format(last.value), None if delta is None else fmt.format(delta))
-
-def plot_lines(df: pd.DataFrame, sids: list[str], title: str, ylab: str = None, years_back: int = 5):
-    """Plot multiple time series lines."""
-    if df.empty or not sids:
-        st.info("No data to plot yet.")
-        return
-    min_date = pd.Timestamp.today() - pd.DateOffset(years=years_back)
-    dfp = df[df.series_id.isin(sids)].copy()
-    dfp = dfp[dfp["date"] >= min_date]
-    dfp["series_name"] = dfp.series_id.map(lambda x: SERIES.get(x, {}).get("name", x))
-
-    fig = px.line(dfp, x="date", y="value", color="series_name", markers=False, title=title)
-    if ylab:
-        fig.update_yaxes(title_text=ylab)
-    fig.update_layout(height=480, legend_title_text="Series")
-    st.plotly_chart(fig, use_container_width=True)
+def series_payload_to_rows(series_json):
+    """Flatten each BLS series JSON into rows of date, value."""
+    sid = series_json["seriesID"]
+    rows = []
+    for item in series_json["data"]:
+        p = item.get("period")
+        if not p or p == "M13":
+            continue  # drop annual averages
+        if not p.startswith("M"):
+            continue
+        year = int(item["year"])
+        month = int(p[1:])
+        dt = pd.Timestamp(year=year, month=month, day=1)
+        rows.append({
+            "series_id": sid,
+            "date": dt,
+            "value": float(item["value"]),
+        })
+    return rows
 
 
-# -----------------------------
-# Streamlit app
-# -----------------------------
-def run():
-    st.set_page_config(page_title="US Labor Statistics Dashboard", page_icon="📊", layout="wide")
-    st.title("US Labor Statistics Dashboard — U.S. Bureau of Labor Statistics")
+# ===========================================================
+# 3. Download & Save Unified Dataset
+# ===========================================================
+data_dir = Path("data")
+data_dir.mkdir(parents=True, exist_ok=True)
 
-    st.sidebar.success("Use the tabs to explore data.")
-    st.sidebar.caption("Data source: BLS Public API • Updates monthly via GitHub Actions")
+print("Fetching data from BLS API...")
+api = fetch_bls_timeseries(list(SERIES.keys()), START_YEAR, END_YEAR)
+rows = []
+for s in api["Results"]["series"]:
+    rows.extend(series_payload_to_rows(s))
 
-    df = load_data()
-    meta = load_meta()
+df = pd.DataFrame(rows).sort_values(["series_id", "date"]).reset_index(drop=True)
+df.to_csv(data_dir / "bls_timeseries.csv", index=False)
+print(f"✅ Saved {len(df)} rows to {data_dir / 'bls_timeseries.csv'}")
 
-    st.caption(f"**Last dataset update (UTC):** {meta.get('last_updated_utc', 'unknown')}")
+# Show data coverage summary
+display(df.groupby("series_id")["date"].agg(["min", "max", "count"]))
 
-    if df.empty:
-        st.warning("⚠️ No dataset found. Run `python src/update_dataset.py` or trigger GitHub Action to create `data/bls_timeseries.csv`.")
-        st.stop()
 
-    # -----------------------------
-    # Headline KPIs (Employment)
-    # -----------------------------
-    st.subheader("Key Employment Indicators")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1: kpi(df, "CES0000000001", "Nonfarm Payrolls (k)", "{:,.0f}")
-    with col2: kpi(df, "LNS14000000", "Unemployment Rate (%)", "{:.1f}")
-    with col3: kpi(df, "LNS12000000", "Civilian Employment (k)", "{:,.0f}")
-    with col4: kpi(df, "CES0500000002", "Avg Weekly Hours", "{:.1f}")
-    with col5: kpi(df, "CES0500000003", "Avg Hourly Earnings ($)", "{:.2f}")
+# ===========================================================
+# 4. Helper Functions
+# ===========================================================
+def plot_series(df_long, series_ids, title=None, ylabel=None, since=None):
+    """Plot each series with Matplotlib."""
+    sub = df_long[df_long.series_id.isin(series_ids)].copy()
+    if since is not None:
+        sub = sub[sub.date >= pd.to_datetime(since)]
+    present = sorted(sub["series_id"].unique())
+    missing = [sid for sid in series_ids if sid not in present]
+    if missing:
+        print("⚠️ No data for:", ", ".join(missing))
+    for sid in present:
+        name = SERIES.get(sid, {}).get("name", sid)
+        d = sub[sub.series_id == sid]
+        plt.figure()
+        plt.plot(d["date"], d["value"], marker="o")
+        plt.title(name if title is None else title)
+        plt.xlabel("Date")
+        plt.ylabel(ylabel or "Value")
+        plt.show()
 
-    # Tabs by section
-    tabs = st.tabs(SECTIONS)
 
-    # Employment
-    with tabs[0]:
-        st.subheader("Employment Trends")
-        years = st.slider("Show last N years", 1, 15, 5, key="years_emp")
-        sids = ["LNS12000000", "CES0000000001", "LNS14000000", "CES0500000002", "CES0500000003"]
-        plot_lines(df, sids, "Employment Indicators", years_back=years)
+def yoy(df_long, sid):
+    """Compute year-over-year percentage change."""
+    d = df_long[df_long.series_id == sid].set_index("date").sort_index()[["value"]].copy()
+    d["YoY %"] = d["value"].pct_change(12) * 100
+    return d
 
-    # Productivity
-    with tabs[1]:
-        st.subheader("Productivity (Quarterly)")
-        years = st.slider("Show last N years", 1, 15, 10, key="years_prod")
-        plot_lines(df, ["PRS85006093"], "Output per Hour — Nonfarm Business (Q/Q %)", "Q/Q %", years_back=years)
 
-    # Price Index
-    with tabs[2]:
-        st.subheader("Price Index — CPI-U")
-        years = st.slider("Show last N years", 1, 20, 10, key="years_cpi")
-        plot_lines(df, ["CUUR0000SA0"], "CPI-U All Items (NSA, 1982–84=100)", "Index", years_back=years)
+# ===========================================================
+# 5. Visualizations by Section
+# ===========================================================
 
-        cpi = df[df.series_id == "CUUR0000SA0"].set_index("date").sort_index()
-        cpi["YoY %"] = cpi["value"].pct_change(12) * 100
-        cpi = cpi.reset_index()
-        cpi = cpi[cpi["date"] >= (pd.Timestamp.today() - pd.DateOffset(years=years))]
-        fig = px.line(cpi, x="date", y="YoY %", title="CPI-U — 12-Month % Change")
-        st.plotly_chart(fig, use_container_width=True)
+# --- Employment ---
+employment_ids = ["LNS12000000", "CES0000000001", "LNS14000000", "CES0500000002", "CES0500000003"]
+plot_series(df, employment_ids, title="Employment Indicators", since=f"{START_YEAR}-01-01")
 
-    # Compensation
-    with tabs[3]:
-        st.subheader("Compensation (ECI)")
-        years = st.slider("Show last N years", 1, 20, 10, key="years_eci")
-        plot_lines(df, ["CIU1010000000000I"], "Employment Cost Index — Total Compensation (12m % chg)", "%", years_back=years)
+# --- Productivity ---
+plot_series(df, ["PRS85006093"], title="Output per Hour — Nonfarm Business (Q/Q %)", ylabel="Q/Q %", since=f"{START_YEAR}-01-01")
 
-    st.caption("Built with Streamlit • Data via BLS API • Updated automatically once per month.")
+# --- Price Index (CPI) ---
+plot_series(df, ["CUUR0000SA0"], title="CPI-U All Items (NSA, 1982–84=100)", ylabel="Index", since=f"{START_YEAR}-01-01")
 
-# -----------------------------
-# Entrypoint
-# -----------------------------
-if __name__ == "__main__":
-    run()
+cpi_y = yoy(df, "CUUR0000SA0")
+plt.figure()
+plt.plot(cpi_y.index, cpi_y["YoY %"])
+plt.title("CPI-U — 12-month % change")
+plt.xlabel("Date")
+plt.ylabel("YoY %")
+plt.show()
+
+# --- Compensation (ECI) ---
+plot_series(df, ["CIU1010000000000I"], title="Employment Cost Index (12m % chg)", ylabel="%", since=f"{START_YEAR}-01-01")
+
+print("✅ All plots generated successfully!")
