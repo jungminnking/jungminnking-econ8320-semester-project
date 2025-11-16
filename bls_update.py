@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+BLS updater: fetches curated series, parses monthly + quarterly (Q01..Q04),
+de-dupes with existing CSV, and writes a long-form dataset for the Streamlit app.
+Run locally or via GitHub Actions (see .github/workflows/update.yml).
+Updated 2025-11-15 23:14 UTC
+"""
+
 import os, json, requests
 from datetime import datetime
 from pathlib import Path
@@ -7,14 +14,19 @@ import pandas as pd
 START_YEAR = 2006
 END_YEAR = datetime.utcnow().year
 
+# Curated series aligned with proposal + rubric
 SERIES = {
+    # Employment (Monthly, SA)
     "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
     "CES0000000001": {"section": "Employment", "name": "Total Nonfarm Employment (Thousands, SA)", "freq": "M"},
     "LNS14000000": {"section": "Employment", "name": "Unemployment Rate (% SA)", "freq": "M"},
     "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
     "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
+    # Productivity (Quarterly, SA) — percent change from previous quarter
     "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)", "freq": "Q"},
+    # Price Index (Monthly, NSA)
     "CUUR0000SA0": {"section": "Price Index", "name": "CPI-U All Items (NSA, 1982–84=100)", "freq": "M"},
+    # Compensation (Quarterly, NSA)
     "CIU1010000000000I": {"section": "Compensation", "name": "ECI — Total Compensation, Private (Index, NSA)", "freq": "Q"},
     "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)", "freq": "Q"},
 }
@@ -74,11 +86,18 @@ def union_and_dedupe(df_old, df_new):
 
 def run_full_or_incremental():
     df_old = load_existing()
-    start = START_YEAR if df_old.empty else max(START_YEAR, (df_old['date'].max() - pd.DateOffset(months=24)).year)
+    if df_old.empty:
+        start = START_YEAR
+    else:
+        last_date = df_old["date"].max()
+        start = max(START_YEAR, (last_date - pd.DateOffset(months=24)).year)  # backfill window for revisions
+
     api = fetch_bls_timeseries(list(SERIES.keys()), start, END_YEAR)
     rows = [r for s in api["Results"]["series"] for r in series_payload_to_rows(s)]
     df_new = pd.DataFrame(rows)
     df_out = union_and_dedupe(df_old, df_new)
+
+    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(CSV_PATH, index=False)
     META_PATH.write_text(json.dumps({"last_updated_utc": datetime.utcnow().isoformat()}, indent=2))
     print(f"Updated {len(df_out)} rows → {CSV_PATH}")

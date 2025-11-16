@@ -1,4 +1,4 @@
-pandas
-requests
-streamlit
-plotly
+pandas>=2.1
+requests>=2.31
+streamlit>=1.36
+plotly>=5.20
