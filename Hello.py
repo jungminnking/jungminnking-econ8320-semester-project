@@ -5,7 +5,7 @@
 # -----------------------------------------------------------
 # Features:
 # - Correct BLS series IDs (PRS85006093, CIU1010000000000I)
-# - Keeps quarterly data (M03/M06/M09/M12)
+# - Keeps quarterly data (Q→M: 03/06/09/12)
 # - Fetches data from BLS API
 # - Saves unified CSV for Streamlit dashboard
 # - Visualizes Employment, Productivity, CPI, and ECI
@@ -19,8 +19,15 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
 
-# Plot settings
-%matplotlib inline
+# -------- Plot settings (safe in .py and notebooks) --------
+try:
+    import IPython  # only present in notebook/REPL
+    ip = IPython.get_ipython()
+    if ip is not None:
+        ip.run_line_magic("matplotlib", "inline")
+except Exception:
+    pass
+
 plt.rcParams["figure.figsize"] = (11, 5)
 plt.rcParams["axes.grid"] = True
 pd.set_option("display.float_format", lambda x: f"{x:,.3f}")
@@ -28,6 +35,11 @@ pd.set_option("display.float_format", lambda x: f"{x:,.3f}")
 START_YEAR = 2006
 END_YEAR = datetime.utcnow().year
 print("Pandas", pd.__version__, "| Years", START_YEAR, "→", END_YEAR)
+
+# -------- Paths (relative to this file) --------
+BASE_DIR = Path(__file__).resolve().parent
+data_dir = BASE_DIR / "data"
+data_dir.mkdir(parents=True, exist_ok=True)
 
 # ===========================================================
 # 1. BLS Series Configuration
@@ -40,7 +52,7 @@ SERIES = {
     "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
     "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
 
-    # Productivity (Quarterly, SA)
+    # Productivity (Quarterly, SA — Q/Q %)
     "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)", "freq": "Q"},
 
     # Price Index (Monthly, NSA)
@@ -77,19 +89,28 @@ def fetch_bls_timeseries(series_ids, start_year, end_year):
         raise BLSError(f"BLS API error: {json.dumps(data)[:300]}")
     return data
 
+def _q_to_month(q: int) -> int:
+    return {1: 3, 2: 6, 3: 9, 4: 12}[q]
 
 def series_payload_to_rows(series_json):
-    """Flatten each BLS series JSON into rows of date, value."""
+    """Flatten each BLS series JSON into rows of (series_id, date, value).
+       Keeps monthly (M01..M12) and quarterly (Q01..Q04→Mar/Jun/Sep/Dec)."""
     sid = series_json["seriesID"]
     rows = []
-    for item in series_json["data"]:
+    for item in series_json.get("data", []):
         p = item.get("period")
         if not p or p == "M13":
             continue  # drop annual averages
-        if not p.startswith("M"):
-            continue
+
         year = int(item["year"])
-        month = int(p[1:])
+        if p.startswith("M"):
+            month = int(p[1:])
+        elif p.startswith("Q"):
+            month = _q_to_month(int(p[1:]))
+        else:
+            # Unknown period (e.g., annual), skip
+            continue
+
         dt = pd.Timestamp(year=year, month=month, day=1)
         rows.append({
             "series_id": sid,
@@ -98,26 +119,30 @@ def series_payload_to_rows(series_json):
         })
     return rows
 
-
 # ===========================================================
 # 3. Download & Save Unified Dataset
 # ===========================================================
-data_dir = Path("data")
-data_dir.mkdir(parents=True, exist_ok=True)
-
 print("Fetching data from BLS API...")
 api = fetch_bls_timeseries(list(SERIES.keys()), START_YEAR, END_YEAR)
+
 rows = []
 for s in api["Results"]["series"]:
     rows.extend(series_payload_to_rows(s))
 
 df = pd.DataFrame(rows).sort_values(["series_id", "date"]).reset_index(drop=True)
-df.to_csv(data_dir / "bls_timeseries.csv", index=False)
-print(f"✅ Saved {len(df)} rows to {data_dir / 'bls_timeseries.csv'}")
+out_path = data_dir / "bls_timeseries.csv"
+df.to_csv(out_path, index=False)
+print(f"✅ Saved {len(df)} rows to {out_path}")
 
-# Show data coverage summary
-display(df.groupby("series_id")["date"].agg(["min", "max", "count"]))
-
+# Show data coverage summary (works in plain Python, too)
+coverage = (
+    df.groupby("series_id")["date"]
+      .agg(["min", "max", "count"])
+      .rename_axis("series_id")
+      .reset_index()
+)
+print("\nCoverage:")
+print(coverage.to_string(index=False))
 
 # ===========================================================
 # 4. Helper Functions
@@ -133,26 +158,29 @@ def plot_series(df_long, series_ids, title=None, ylabel=None, since=None):
         print("⚠️ No data for:", ", ".join(missing))
     for sid in present:
         name = SERIES.get(sid, {}).get("name", sid)
-        d = sub[sub.series_id == sid]
+        d = sub[sub.series_id == sid].sort_values("date")
         plt.figure()
-        plt.plot(d["date"], d["value"], marker="o")
-        plt.title(name if title is None else title)
+        plt.plot(d["date"], d["value"], marker="o", linewidth=1)
+        plt.title(title or name)
         plt.xlabel("Date")
         plt.ylabel(ylabel or "Value")
+        plt.tight_layout()
         plt.show()
 
-
 def yoy(df_long, sid):
-    """Compute year-over-year percentage change."""
-    d = df_long[df_long.series_id == sid].set_index("date").sort_index()[["value"]].copy()
-    d["YoY %"] = d["value"].pct_change(12) * 100
+    """Compute year-over-year percentage change (12m for M, 4q for Q)."""
+    freq = SERIES.get(sid, {}).get("freq", "M").upper()
+    lag = 4 if freq.startswith("Q") else 12
+    d = (df_long[df_long.series_id == sid]
+         .set_index("date")
+         .sort_index()[["value"]]
+         .copy())
+    d["YoY %"] = d["value"].pct_change(lag) * 100
     return d
-
 
 # ===========================================================
 # 5. Visualizations by Section
 # ===========================================================
-
 # --- Employment ---
 employment_ids = ["LNS12000000", "CES0000000001", "LNS14000000", "CES0500000002", "CES0500000003"]
 plot_series(df, employment_ids, title="Employment Indicators", since=f"{START_YEAR}-01-01")
@@ -165,10 +193,11 @@ plot_series(df, ["CUUR0000SA0"], title="CPI-U All Items (NSA, 1982–84=100)", y
 
 cpi_y = yoy(df, "CUUR0000SA0")
 plt.figure()
-plt.plot(cpi_y.index, cpi_y["YoY %"])
+plt.plot(cpi_y.index, cpi_y["YoY %"], linewidth=1)
 plt.title("CPI-U — 12-month % change")
 plt.xlabel("Date")
 plt.ylabel("YoY %")
+plt.tight_layout()
 plt.show()
 
 # --- Compensation (ECI) ---
