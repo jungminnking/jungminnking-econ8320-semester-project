@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-BLS updater: fetches curated series, parses monthly + quarterly (Q01..Q04),
-de-dupes with existing CSV, and writes a long-form dataset for the Streamlit app.
-Run locally or via GitHub Actions (see .github/workflows/update.yml).
-Updated 2025-11-15 23:14 UTC
-"""
-
 import os, json, requests
 from datetime import datetime
 from pathlib import Path
