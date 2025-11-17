@@ -1,12 +1,10 @@
 # %run "C:/Users/jungm/Documents/GitHub/jungminnking-econ8320-semester-project/Hello.py"
 # Hello.py — Fetch BLS time series and save into your GitHub repo's /data folder
-
 import os
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Any
-
 import requests
 import pandas as pd
 
