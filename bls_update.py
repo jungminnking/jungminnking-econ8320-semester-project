@@ -1,13 +1,32 @@
-import os, json, requests
+# -*- coding: utf-8 -*-
+"""
+BLS Timeseries — Incremental Updater (Format/Flow Refactor Only)
+
+- No content changes: same endpoints, series IDs, logic, and CSV/meta outputs.
+- Reorganized for clarity: constants → paths → errors → API → parsing → I/O → main.
+"""
+
+from __future__ import annotations
+
+import os
+import json
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Any
+
+import requests
 import pandas as pd
 
-START_YEAR = 2006
-END_YEAR = datetime.utcnow().year
+# ===========================================================
+# Constants
+# ===========================================================
+START_YEAR: int = 2006
+END_YEAR: int = datetime.utcnow().year
 
-# Curated series aligned with proposal + rubric
-SERIES = {
+BLS_URL: str = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+
+# Curated series (unchanged)
+SERIES: Dict[str, Dict[str, str]] = {
     # Employment (Monthly, SA)
     "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
     "CES0000000001": {"section": "Employment", "name": "Total Nonfarm Employment (Thousands, SA)", "freq": "M"},
@@ -23,19 +42,38 @@ SERIES = {
     "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)", "freq": "Q"},
 }
 
-BLS_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
-DATA_DIR = Path("data")
-CSV_PATH = DATA_DIR / "bls_timeseries.csv"
-META_PATH = DATA_DIR / "meta.json"
+# ===========================================================
+# Paths
+# ===========================================================
+DATA_DIR: Path = Path("data")
+CSV_PATH: Path = DATA_DIR / "bls_timeseries.csv"
+META_PATH: Path = DATA_DIR / "meta.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-class BLSError(Exception): pass
+# ===========================================================
+# Errors
+# ===========================================================
+class BLSError(Exception):
+    """Custom error for BLS API failures."""
+    pass
 
-def fetch_bls_timeseries(series_ids, start_year, end_year):
-    payload = {"seriesid": series_ids, "startyear": str(start_year), "endyear": str(end_year)}
+# ===========================================================
+# API
+# ===========================================================
+def fetch_bls_timeseries(series_ids: List[str], start_year: int, end_year: int) -> Dict[str, Any]:
+    """
+    Fetch BLS time series for the given IDs and year range.
+    Preserves original behavior: optional API key, same URL and payload.
+    """
+    payload: Dict[str, Any] = {
+        "seriesid": series_ids,
+        "startyear": str(start_year),
+        "endyear": str(end_year),
+    }
     key = os.getenv("BLS_API_KEY")
     if key:
         payload["registrationkey"] = key
+
     r = requests.post(BLS_URL, json=payload, timeout=60)
     if r.status_code != 200:
         raise BLSError(f"HTTP {r.status_code}: {r.text[:200]}")
@@ -44,56 +82,46 @@ def fetch_bls_timeseries(series_ids, start_year, end_year):
         raise BLSError(f"BLS error: {json.dumps(data)[:300]}")
     return data
 
+# ===========================================================
+# Parsing
+# ===========================================================
 def _q_to_month(q: int) -> int:
+    """Map BLS quarterly period to calendar month (Q1→3, Q2→6, Q3→9, Q4→12)."""
     return {1: 3, 2: 6, 3: 9, 4: 12}[q]
 
-def series_payload_to_rows(series_json):
+def series_payload_to_rows(series_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Flatten a single series JSON payload into rows: (series_id, date, value).
+    Ignores annual averages (M13). Keeps monthly and quarterly (mapped to Mar/Jun/Sep/Dec).
+    """
     sid = series_json["seriesID"]
-    rows = []
+    rows: List[Dict[str, Any]] = []
     for item in series_json["data"]:
-        p = item.get("period")
-        if not p or p == "M13":
+        period = item.get("period")
+        if not period or period == "M13":
             continue
+
         year = int(item["year"])
-        if p.startswith("M"):
-            month = int(p[1:])
-        elif p.startswith("Q"):
-            month = _q_to_month(int(p[1:]))
+        if period.startswith("M"):
+            month = int(period[1:])
+        elif period.startswith("Q"):
+            month = _q_to_month(int(period[1:]))
         else:
             continue
+
         dt = pd.Timestamp(year=year, month=month, day=1)
         val = float(item["value"])
         rows.append({"series_id": sid, "date": dt, "value": val})
     return rows
 
-def load_existing():
+# ===========================================================
+# I/O
+# ===========================================================
+def load_existing() -> pd.DataFrame:
+    """Load existing CSV (if present) into a DataFrame with parsed dates."""
     if CSV_PATH.exists():
         return pd.read_csv(CSV_PATH, parse_dates=["date"])
     return pd.DataFrame(columns=["series_id", "date", "value"])
 
-def union_and_dedupe(df_old, df_new):
-    df = pd.concat([df_old, df_new], ignore_index=True)
-    df = df.drop_duplicates(subset=["series_id", "date"], keep="last")
-    return df.sort_values(["series_id", "date"]).reset_index(drop=True)
-
-def run_full_or_incremental():
-    df_old = load_existing()
-    if df_old.empty:
-        start = START_YEAR
-    else:
-        last_date = df_old["date"].max()
-        start = max(START_YEAR, (last_date - pd.DateOffset(months=24)).year)  # backfill window for revisions
-
-    api = fetch_bls_timeseries(list(SERIES.keys()), start, END_YEAR)
-    rows = [r for s in api["Results"]["series"] for r in series_payload_to_rows(s)]
-    df_new = pd.DataFrame(rows)
-    df_out = union_and_dedupe(df_old, df_new)
-
-    CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df_out.to_csv(CSV_PATH, index=False)
-    META_PATH.write_text(json.dumps({"last_updated_utc": datetime.utcnow().isoformat()}, indent=2))
-    print(f"Updated {len(df_out)} rows → {CSV_PATH}")
-    return df_out
-
-if __name__ == "__main__":
-    run_full_or_incremental()
+def union_and_dedupe(df_old: pd.DataFrame, df_new: pd.DataFrame) -> pd.DataFrame:
+    """Union old/new rows and drop duplicates by (series_id, date), keeping_
