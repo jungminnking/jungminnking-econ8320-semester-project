@@ -1,4 +1,4 @@
-# streamlit_app.py — US Labor Dashboard (original data only; no derived series)
+# streamlit_app.py — Simplified US Labor Dashboard (tabs only, no section/series pickers)
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -8,10 +8,10 @@ import plotly.express as px
 # ───────────────────────────────────────────────────────────
 st.set_page_config(page_title="US Labor Dashboard", page_icon="📊", layout="wide")
 st.title("US Labor Dashboard")
-st.caption("BLS dashboard — original source data only (no derived series)")
+st.caption("BLS dashboard — original source data only (tabs by section)")
 
 # ───────────────────────────────────────────────────────────
-# Simple data read (GitHub only)
+# Load CSV directly from GitHub
 # ───────────────────────────────────────────────────────────
 CSV_URL = "https://github.com/jungminnking/jungminnking-econ8320-semester-project/raw/main/data/bls_timeseries.csv"
 
@@ -23,67 +23,52 @@ def load_data(url: str) -> pd.DataFrame:
 
 df_all = load_data(CSV_URL)
 
-# Guard
 if df_all.empty:
     st.error("The CSV loaded successfully but contains no rows.")
     st.stop()
 
 # ───────────────────────────────────────────────────────────
-# Series Catalog (must match your updater)
+# Series Catalog (matches your repo)
 # ───────────────────────────────────────────────────────────
 SERIES = {
-    "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
-    "CES0000000001": {"section": "Employment", "name": "Total Nonfarm Employment (Thousands, SA)", "freq": "M"},
-    "LNS14000000": {"section": "Employment", "name": "Unemployment Rate (% SA)", "freq": "M"},
-    "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
-    "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
-    "PRS85006092": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)", "freq": "Q"},
-    "CUUR0000SA0": {"section": "Price Index", "name": "CPI-U All Items (NSA, 1982–84=100)", "freq": "M"},
-    "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)", "freq": "Q"},
+    "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)"},
+    "CES0000000001": {"section": "Employment", "name": "Total Nonfarm Employment (Thousands, SA)"},
+    "LNS14000000": {"section": "Employment", "name": "Unemployment Rate (% SA)"},
+    "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)"},
+    "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)"},
+    "PRS85006092": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)"},
+    "CUUR0000SA0": {"section": "Price Index", "name": "CPI-U All Items (NSA, 1982–84=100)"},
+    "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)"},
 }
 SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
 
 # ───────────────────────────────────────────────────────────
-# Sidebar filters
+# Sidebar — only year range filter
 # ───────────────────────────────────────────────────────────
-section = st.sidebar.multiselect("Sections", SECTIONS, default=SECTIONS)
-eligible = [sid for sid, meta in SERIES.items() if meta["section"] in section]
-
 min_year = int(df_all["date"].dt.year.min())
 max_year = int(df_all["date"].dt.year.max())
-
-pick = st.sidebar.multiselect(
-    "Series",
-    eligible,
-    default=eligible,
-    format_func=lambda sid: f"{SERIES[sid]['section']} — {SERIES[sid]['name']}",
-)
 
 year_min, year_max = st.sidebar.slider(
     "Year range", min_value=min_year, max_value=max_year, value=(min_year, max_year)
 )
 
 # ───────────────────────────────────────────────────────────
-# Filter + coverage (original rows only)
+# Filter data
 # ───────────────────────────────────────────────────────────
-df = df_all[df_all["series_id"].isin(pick)] if pick else df_all.iloc[0:0]
-df = df[(df["date"].dt.year >= year_min) & (df["date"].dt.year <= year_max)]
+df = df_all[(df_all["date"].dt.year >= year_min) & (df_all["date"].dt.year <= year_max)]
 
 st.subheader("Data coverage")
-if df.empty:
-    st.info("No rows match the current filters.")
-else:
-    coverage = (
-        df.groupby("series_id")["date"]
-        .agg(["min", "max", "count"])
-        .rename_axis("series_id")
-        .reset_index()
-    )
-    coverage["series_name"] = coverage["series_id"].map(lambda sid: SERIES.get(sid, {}).get("name", sid))
-    st.caption(f"Rows: {len(df):,} • Min date: {df['date'].min().date()} • Max date: {df['date'].max().date()}")
-    st.dataframe(coverage[["series_id", "series_name", "min", "max", "count"]], use_container_width=True)
+coverage = (
+    df.groupby("series_id")["date"]
+    .agg(["min", "max", "count"])
+    .rename_axis("series_id")
+    .reset_index()
+)
+coverage["series_name"] = coverage["series_id"].map(lambda sid: SERIES.get(sid, {}).get("name", sid))
+st.caption(f"Rows: {len(df):,} • Min date: {df['date'].min().date()} • Max date: {df['date'].max().date()}")
+st.dataframe(coverage[["series_id", "series_name", "min", "max", "count"]], use_container_width=True)
 
-# Optional: download filtered CSV (still original rows, just filtered)
+# Download filtered CSV
 st.download_button(
     "⬇️ Download filtered CSV",
     df.to_csv(index=False).encode("utf-8"),
@@ -92,20 +77,14 @@ st.download_button(
 )
 
 # ───────────────────────────────────────────────────────────
-# Charts (tabs by section) — original series only
+# Charts in tabs (one tab per section)
 # ───────────────────────────────────────────────────────────
-active_sections = section or SECTIONS
-tabs = st.tabs(active_sections)
-tab_by_section = dict(zip(active_sections, tabs))
+tabs = st.tabs(SECTIONS)
 
-for sec in active_sections:
-    with tab_by_section[sec]:
-        sub_ids = [sid for sid in pick if sid in SERIES and SERIES[sid]["section"] == sec]
+for sec, tab in zip(SECTIONS, tabs):
+    with tab:
         st.subheader(sec)
-
-        if not sub_ids:
-            st.info("No series selected for this section.")
-            continue
+        sub_ids = [sid for sid, meta in SERIES.items() if meta["section"] == sec]
 
         for sid in sub_ids:
             name = SERIES[sid]["name"]
@@ -113,11 +92,7 @@ for sec in active_sections:
             if d.empty:
                 continue
 
-            # Single chart per original series (no derived YoY/metrics)
-            fig = px.line(
-                d, x="date", y="value", title=name,
-                labels={"value": "Value", "date": "Date"}
-            )
+            fig = px.line(d, x="date", y="value", title=name, labels={"value": "Value", "date": "Date"})
             fig.update_traces(mode="lines+markers", hovertemplate="%{x|%Y-%m} — %{y:.2f}")
             st.plotly_chart(fig, use_container_width=True)
 
@@ -125,4 +100,5 @@ for sec in active_sections:
 # Footer
 # ───────────────────────────────────────────────────────────
 st.write("---")
-st.caption(f"Reading original source CSV from: {CSV_URL}")
+st.caption(f"Reading data directly from: {CSV_URL}")
+
