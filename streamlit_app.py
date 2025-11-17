@@ -15,12 +15,15 @@ st.set_page_config(page_title="US Labor Dashboard", page_icon="📊", layout="wi
 st.title("US Labor Dashboard")
 st.caption("Auto-updating BLS dashboard (Econ 8320 project)")
 
+# Resolve app directory even when run with `streamlit run`
 try:
     BASE_DIR = Path(__file__).resolve().parent
 except NameError:
     BASE_DIR = Path.cwd()
 
-DATA_DIR = Path(st.secrets.get("LABOR_DASH_DATA_DIR", BASE_DIR / "data"))
+# Allow override via Streamlit secrets; accept both string and Path-like
+_secrets_dir = st.secrets.get("LABOR_DASH_DATA_DIR", str(BASE_DIR / "data"))
+DATA_DIR = Path(_secrets_dir)
 CSV_PATH = DATA_DIR / "bls_timeseries.csv"
 META_PATH = DATA_DIR / "meta.json"
 
@@ -43,12 +46,21 @@ SERIES = {
 
     # Compensation — quarterly, NSA
     "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)", "freq": "Q"},
+    # If you also save the index series, uncomment this:
+    # "CIU1010000000000I": {"section": "Compensation", "name": "ECI — Total Compensation, Private (Index, NSA)", "freq": "Q"},
 }
 SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
 
-@st.cache_data
-def load_data(csv_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(csv_path, parse_dates=["date"])
+# ---------------------------------------------------------------------
+# Caching with cache-busting by file mtime
+# ---------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_data(csv_path_str: str, csv_mtime: float) -> pd.DataFrame:
+    """
+    Cache depends on both the path string and its modification time,
+    so new CSV writes automatically invalidate the cache.
+    """
+    df = pd.read_csv(csv_path_str, parse_dates=["date"])
     df["series_id"] = df["series_id"].astype("string")
     return df
 
@@ -93,10 +105,28 @@ if not CSV_PATH.exists():
     st.stop()
 
 # ---------------------------------------------------------------------
-# Sidebar filters
+# Sidebar – cache control + filters
 # ---------------------------------------------------------------------
+# Manual reload button
+if st.sidebar.button("🔄 Reload data"):
+    st.cache_data.clear()
+    st.experimental_rerun()
+
 section = st.sidebar.multiselect("Sections", SECTIONS, default=SECTIONS)
 eligible = [sid for sid, meta in SERIES.items() if meta["section"] in section]
+
+# Load data (cache keyed by mtime)
+csv_mtime = CSV_PATH.stat().st_mtime
+df_all = load_data(str(CSV_PATH), csv_mtime)
+
+# Compute slider bounds from the data itself
+if df_all.empty:
+    st.error("CSV is present but contains no rows.")
+    st.stop()
+
+min_year = int(df_all["date"].dt.year.min())
+max_year = int(df_all["date"].dt.year.max())
+
 pick = st.sidebar.multiselect(
     "Series",
     eligible,
@@ -104,32 +134,41 @@ pick = st.sidebar.multiselect(
     format_func=lambda sid: f"{SERIES[sid]['section']} — {SERIES[sid]['name']}",
 )
 
-year_min_default, year_max_default = 2006, datetime.utcnow().year
 year_min, year_max = st.sidebar.slider(
     "Year range",
-    min_value=2006,
-    max_value=year_max_default,
-    value=(year_min_default, year_max_default),
+    min_value=min_year,
+    max_value=max_year,
+    value=(min_year, max_year),
 )
 
 # ---------------------------------------------------------------------
 # Load, filter, and show coverage
 # ---------------------------------------------------------------------
-df = load_data(CSV_PATH)
+df = df_all.copy()
 if pick:
     df = df[df["series_id"].isin(pick)]
+else:
+    # If nothing selected, show nothing but keep the app running
+    df = df.iloc[0:0]
+
 df = df[(df["date"].dt.year >= year_min) & (df["date"].dt.year <= year_max)]
 
 st.subheader("Data coverage")
-coverage = (
-    df.groupby("series_id")["date"]
-    .agg(["min", "max", "count"])
-    .rename_axis("series_id")
-    .reset_index()
-)
-coverage["series_name"] = coverage["series_id"].map(lambda sid: SERIES.get(sid, {}).get("name", sid))
-coverage = coverage[["series_id", "series_name", "min", "max", "count"]]
-st.dataframe(coverage, use_container_width=True)
+if df.empty:
+    st.info("No rows match the current filters.")
+else:
+    coverage = (
+        df.groupby("series_id")["date"]
+        .agg(["min", "max", "count"])
+        .rename_axis("series_id")
+        .reset_index()
+    )
+    coverage["series_name"] = coverage["series_id"].map(lambda sid: SERIES.get(sid, {}).get("name", sid))
+    coverage = coverage[["series_id", "series_name", "min", "max", "count"]]
+    st.caption(
+        f"Rows: {len(df):,} • Min date: {df['date'].min().date()} • Max date: {df['date'].max().date()}"
+    )
+    st.dataframe(coverage, use_container_width=True)
 
 # Downloads
 c1, c2 = st.columns(2)
@@ -152,7 +191,7 @@ with c2:
 # Charts
 # ---------------------------------------------------------------------
 for sec in SECTIONS:
-    sub_ids = [sid for sid in pick if SERIES[sid]["section"] == sec]
+    sub_ids = [sid for sid in pick if sid in SERIES and SERIES[sid]["section"] == sec]
     if not sub_ids:
         continue
 
@@ -171,7 +210,7 @@ for sec in SECTIONS:
 
         # YoY chart for select level series
         if sid in {"CUUR0000SA0", "CES0500000003"} or sid.endswith("I"):
-            yoy = yoy_from_level(df, sid).dropna()
+            yoy = yoy_from_level(df_all, sid).dropna()
             yoy = yoy[(yoy["date"].dt.year >= year_min) & (yoy["date"].dt.year <= year_max)]
             if not yoy.empty:
                 fig2 = px.line(
