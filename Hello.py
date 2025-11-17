@@ -1,21 +1,25 @@
 # %run "C:/Users/jungm/Documents/GitHub/jungminnking-econ8320-semester-project/Hello.py"
-# Imports
-import os                         # Read environment variables (e.g., BLS_API_KEY)
-import json                       # Read/write meta.json (a simple timestamp file)
-from datetime import datetime, timezone     # Add timezone for UTC handling
-from pathlib import Path          # Clean, cross-platform path handling
-from typing import Dict, List, Any  # Type hints for clarity (non-functional at runtime)
-import requests                   # Make HTTP POST requests to the BLS API
-import pandas as pd               # Work with tabular data (DataFrames)
+# Hello.py — Fetch BLS time series and save into your GitHub repo's /data folder
 
-# 1) CONSTANTS — global config and BLS series definitions
-BLS_URL: str = "https://api.bls.gov/publicAPI/v2/timeseries/data/"  # BLS v2 endpoint
-START_YEAR: int = 2006                 # Earliest year to include in the data
-END_YEAR: int = datetime.now(timezone.utc).year
+import os
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Any
 
-# List-of-tuples: (series_id, section, name, frequency)
+import requests
+import pandas as pd
+
+# ===========================================================
+# 1) CONFIG — API, years, and series list
+# ===========================================================
+BLS_URL: str = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+START_YEAR: int = 2006
+END_YEAR: int = datetime.now(timezone.utc).year  # current year
+
+# Series: (ID, section, name, frequency)
 SERIES = [
-     ("LNS12000000", "Employment", "Civilian Employment (Thousands, SA)", "M"),
+    ("LNS12000000", "Employment", "Civilian Employment (Thousands, SA)", "M"),
     ("CES0000000001", "Employment", "Total Nonfarm Employment (Thousands, SA)", "M"),
     ("LNS14000000", "Employment", "Unemployment Rate (% SA)", "M"),
     ("CES0500000002", "Employment", "Avg Weekly Hours, Total Private (SA)", "M"),
@@ -26,25 +30,32 @@ SERIES = [
 ]
 
 # ===========================================================
-# 2) PATHS — where to store outputs (CSV + meta)
+# 2) PATHS — point to your local GitHub repo folder
 # ===========================================================
-DATA_DIR: Path = Path("data")                                 # Root folder for outputs
-CSV_PATH: Path = DATA_DIR / "bls_timeseries.csv"              # Main dataset (long format)
-META_PATH: Path = DATA_DIR / "meta.json"                      # JSON metadata (last update)
+# ⚠️ Replace this path with where your repo is cloned locally.
+# The repo link (https://github.com/...) itself is just the remote.
+REPO_DIR: Path = Path(r"C:/Users/jungm/Documents/GitHub/jungminnking-econ8320-semester-project")
+DATA_DIR: Path = REPO_DIR / "data"
+CSV_PATH: Path = DATA_DIR / "bls_timeseries.csv"
+META_PATH: Path = DATA_DIR / "meta.json"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ===========================================================
-# 4) API — request helper to fetch multiple series in one POST
+# 3) ERROR CLASS
+# ===========================================================
+class BLSError(Exception):
+    """Raised for HTTP or logical errors from the BLS API."""
+    pass
+
+# ===========================================================
+# 4) API FETCH FUNCTION
 # ===========================================================
 def bls_timeseries(series_ids: List[str], start_year: int, end_year: int) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "seriesid": series_ids,
-        "startyear": str(start_year),
-        "endyear": str(end_year),
-    }
+    """Fetch multiple BLS time series in one API call."""
+    payload = {"seriesid": series_ids, "startyear": str(start_year), "endyear": str(end_year)}
     key = os.getenv("BLS_API_KEY")
     if key:
         payload["registrationkey"] = key
-
     r = requests.post(BLS_URL, json=payload, timeout=60)
     if r.status_code != 200:
         raise BLSError(f"HTTP {r.status_code}: {r.text[:200]}")
@@ -54,26 +65,20 @@ def bls_timeseries(series_ids: List[str], start_year: int, end_year: int) -> Dic
     return data
 
 # ===========================================================
-# 5) PARSING — convert BLS periods to monthly timestamps and tidy rows
+# 5) PARSING FUNCTIONS
 # ===========================================================
 def _q_to_month(q: int) -> int:
-    """Q1→3, Q2→6, Q3→9, Q4→12 (pin quarterly data to the last month of the quarter)."""
+    """Map quarter number to representative month."""
     return {1: 3, 2: 6, 3: 9, 4: 12}[q]
 
 def series_payload_to_rows(series_json: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Flatten a single series' JSON into a list of tidy rows:
-    {"series_id": <id>, "date": <Timestamp>, "value": <float>}
-    Skips "M13" (annual averages). Supports M01..M12 and Q01..Q04.
-    """
+    """Convert one series’ JSON to tidy rows."""
     sid = series_json["seriesID"]
-    rows: List[Dict[str, Any]] = []
-
+    rows = []
     for item in series_json.get("data", []):
         period = item.get("period")
         if not period or period == "M13":
             continue
-
         year = int(item["year"])
         if period.startswith("M"):
             month = int(period[1:])
@@ -81,64 +86,60 @@ def series_payload_to_rows(series_json: Dict[str, Any]) -> List[Dict[str, Any]]:
             month = _q_to_month(int(period[1:]))
         else:
             continue
-
         dt = pd.Timestamp(year=year, month=month, day=1)
         val = float(item["value"])
         rows.append({"series_id": sid, "date": dt, "value": val})
-
     return rows
 
 # ===========================================================
-# 6) I/O — load existing CSV and merge (union + de-duplicate)
+# 6) CSV LOAD + MERGE
 # ===========================================================
 def load_existing() -> pd.DataFrame:
-    """Load the existing CSV if present; else return an empty DataFrame with correct columns."""
+    """Load existing CSV (if any)."""
     if CSV_PATH.exists():
         return pd.read_csv(CSV_PATH, parse_dates=["date"])
     return pd.DataFrame(columns=["series_id", "date", "value"])
 
 def union_and_dedupe(df_old: pd.DataFrame, df_new: pd.DataFrame) -> pd.DataFrame:
-    """Append new data, drop dups on (series_id, date) keeping last, and sort."""
+    """Combine old + new, drop duplicates by (series_id, date)."""
     df = pd.concat([df_old, df_new], ignore_index=True)
     df = df.drop_duplicates(subset=["series_id", "date"], keep="last")
     return df.sort_values(["series_id", "date"]).reset_index(drop=True)
 
 # ===========================================================
-# 7) MAIN — full or incremental run, save CSV + meta.json
+# 7) MAIN FUNCTION
 # ===========================================================
 def run_full_or_incremental() -> pd.DataFrame:
-    """
-    First run: fetch START_YEAR..END_YEAR.
-    Subsequent runs: backfill 24 months from latest date (to capture revisions).
-    Writes CSV + meta.json. Returns the unified DataFrame.
-    """
+    """Fetch BLS data and save to your GitHub repo’s data folder."""
     df_old = load_existing()
-
     if df_old.empty:
         start = START_YEAR
     else:
         last_date = df_old["date"].max()
         start = max(START_YEAR, (last_date - pd.DateOffset(months=24)).year)
 
-    # *** IMPORTANT: extract IDs from list-of-tuples ***
-    series_ids = [sid for sid, _section, _name, _freq in SERIES]
-
+    series_ids = [sid for sid, *_ in SERIES]
     api = bls_timeseries(series_ids, start, END_YEAR)
     rows = [r for s in api["Results"]["series"] for r in series_payload_to_rows(s)]
     df_new = pd.DataFrame(rows)
-
     df_out = union_and_dedupe(df_old, df_new)
 
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(CSV_PATH, index=False)
-    META_PATH.write_text(json.dumps({"last_updated_utc": datetime.utcnow().isoformat()}, indent=2))
+    META_PATH.write_text(json.dumps({"last_updated_utc": datetime.now(timezone.utc).isoformat()}, indent=2))
 
-    print(f"✅ Updated {len(df_out)} rows → {CSV_PATH}")
+    print(f"✅ Saved {len(df_out):,} rows to {CSV_PATH.resolve()}")
+    print("\nCoverage:")
+    print(df_out.groupby("series_id")["date"].agg(["min", "max", "count"]))
+    print("\nNext steps:")
+    print(f"  cd \"{REPO_DIR}\"")
+    print("  git add data/bls_timeseries.csv data/meta.json")
+    print("  git commit -m \"Update BLS data\"")
+    print("  git push")
     return df_out
 
 # ===========================================================
-# 8) ENTRY POINT — run when executed as a script
+# 8) ENTRY POINT
 # ===========================================================
 if __name__ == "__main__":
-    # Optional: export BLS_API_KEY="your_key_here" for better rate limits
     run_full_or_incremental()

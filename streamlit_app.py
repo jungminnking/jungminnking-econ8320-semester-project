@@ -1,32 +1,50 @@
-# streamlit_app.py — US Labor Dashboard (reads CSV written by Hello.py)
+# streamlit_app.py — US Labor Dashboard (reads CSV from GitHub raw or local)
+
 import json
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import requests
 
 # ───────────────────────────────────────────────────────────
-# Page & Paths
+# Page & Title
 # ───────────────────────────────────────────────────────────
 st.set_page_config(page_title="US Labor Dashboard", page_icon="📊", layout="wide")
 st.title("US Labor Dashboard")
 st.caption("Auto-updating BLS dashboard (Econ 8320 project)")
 
-# Resolve app directory even when run with `streamlit run`
-try:
-    BASE_DIR = Path(__file__).resolve().parent
-except NameError:
-    BASE_DIR = Path.cwd()
+# ───────────────────────────────────────────────────────────
+# Data source configuration
+# ───────────────────────────────────────────────────────────
+# Default to GitHub raw (no local clone required)
+OWNER = "jungminnking"
+REPO = "jungminnking-econ8320-semester-project"
+BRANCH = "main"
+CSV_REPO_PATH = "data/bls_timeseries.csv"
+META_REPO_PATH = "data/meta.json"
 
-# Allow override via Streamlit secrets (string or Path are OK)
-DATA_DIR = Path(st.secrets.get("LABOR_DASH_DATA_DIR", str(BASE_DIR / "data")))
-CSV_PATH = DATA_DIR / "bls_timeseries.csv"
-META_PATH = DATA_DIR / "meta.json"
+RAW_CSV_URL = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/{BRANCH}/{CSV_REPO_PATH}"
+RAW_META_URL = f"https://raw.githubusercontent.com/{OWNER}/{REPO}/{BRANCH}/{META_REPO_PATH}"
+
+# If you prefer a local folder during development, put this in .streamlit/secrets.toml:
+# LABOR_DASH_DATA_DIR = "C:/Users/you/Documents/GitHub/jungminnking-econ8320-semester-project/data"
+local_dir = st.secrets.get("LABOR_DASH_DATA_DIR", "")
+USE_LOCAL = bool(local_dir)
+
+if USE_LOCAL:
+    DATA_DIR = Path(local_dir)
+    CSV_PATH = DATA_DIR / "bls_timeseries.csv"
+    META_PATH = DATA_DIR / "meta.json"
+else:
+    CSV_PATH = None
+    META_PATH = None
 
 # ───────────────────────────────────────────────────────────
-# Series Catalog (must match updater script)
+# Series Catalog (must match updater)
 # ───────────────────────────────────────────────────────────
 SERIES = {
     # Employment — monthly, SA
@@ -35,32 +53,57 @@ SERIES = {
     "LNS14000000": {"section": "Employment", "name": "Unemployment Rate (% SA)", "freq": "M"},
     "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
     "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
-
-    # Productivity — quarterly, SA  (ensure this ID matches your updater)
+    # Productivity — quarterly, SA
     "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)", "freq": "Q"},
-
     # Price Index — monthly, NSA
     "CUUR0000SA0": {"section": "Price Index", "name": "CPI-U All Items (NSA, 1982–84=100)", "freq": "M"},
-
     # Compensation — quarterly, NSA
     "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)", "freq": "Q"},
-    # If you also save the index series, you can include it and get YoY from level:
+    # If you also export the index series, you can enable YoY-from-level:
     # "CIU1010000000000I": {"section": "Compensation", "name": "ECI — Total Compensation, Private (Index, NSA)", "freq": "Q"},
 }
 SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
 
 # ───────────────────────────────────────────────────────────
-# Cache-busted loader (keys cache by file mtime)
+# Helpers: cached fetchers (GitHub or local)
 # ───────────────────────────────────────────────────────────
+def _etag_or_last_modified(url: str) -> str:
+    """Fetch HEAD and return a stable cache key based on ETag/Last-Modified/URL."""
+    try:
+        r = requests.head(url, timeout=10)
+        tag = r.headers.get("ETag") or r.headers.get("Last-Modified") or ""
+        if tag:
+            return tag
+    except Exception:
+        pass
+    # Fallback to URL hash if no headers or HEAD blocked
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
 @st.cache_data(show_spinner=False)
-def load_data(csv_path_str: str, csv_mtime: float) -> pd.DataFrame:
-    """
-    Cache depends on both the path string and its modification time,
-    so new CSV writes automatically invalidate the cache.
-    """
-    df = pd.read_csv(csv_path_str, parse_dates=["date"])
-    df["series_id"] = df["series_id"].astype("string")
-    return df
+def load_csv_from_github(url: str, cache_buster: str) -> pd.DataFrame:
+    # cache_buster ensures cache invalidates when ETag/Last-Modified changes
+    return pd.read_csv(url, parse_dates=["date"]).assign(series_id=lambda d: d["series_id"].astype("string"))
+
+@st.cache_data(show_spinner=False)
+def load_meta_from_github(url: str, cache_buster: str) -> dict:
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+@st.cache_data(show_spinner=False)
+def load_csv_local(path: str, mtime: float) -> pd.DataFrame:
+    return pd.read_csv(path, parse_dates=["date"]).assign(series_id=lambda d: d["series_id"].astype("string"))
+
+@st.cache_data(show_spinner=False)
+def load_meta_local(path: str, mtime: float) -> dict:
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:
+        return {}
 
 def yoy_from_level(df: pd.DataFrame, sid: str) -> pd.DataFrame:
     """Compute YoY % for level series. Lag=12 for M, 4 for Q."""
@@ -78,50 +121,51 @@ def yoy_from_level(df: pd.DataFrame, sid: str) -> pd.DataFrame:
     return d
 
 # ───────────────────────────────────────────────────────────
-# About / Meta
+# About & metadata
 # ───────────────────────────────────────────────────────────
 with st.expander("About & rubric alignment", expanded=False):
     st.markdown(
-        "- Data is fetched by **Hello.py** (locally or via GitHub Actions) and saved to `data/`.\n"
-        "- This app only reads the CSV; it does **not** call the API.\n"
-        "- Includes Employment, Productivity, CPI (NSA), and ECI YoY. Use the sidebar to filter section/series and year range."
+        "- Data is fetched by **Hello.py** (locally or via GitHub Actions) and saved under `data/` in the repo.\n"
+        "- This app reads the CSV **from GitHub raw** by default; you can override with a local data folder via `LABOR_DASH_DATA_DIR`.\n"
+        "- Includes Employment, Productivity, CPI (NSA), and ECI YoY views."
     )
 
-if META_PATH.exists():
-    try:
-        meta = json.loads(META_PATH.read_text())
-        st.caption(f"Last updated (UTC): {meta.get('last_updated_utc', 'unknown')}")
-    except Exception:
-        pass
+# ───────────────────────────────────────────────────────────
+# Load data (GitHub raw by default; local if configured)
+# ───────────────────────────────────────────────────────────
+if USE_LOCAL:
+    if not (CSV_PATH.exists() and CSV_PATH.is_file()):
+        st.error(f"Local CSV not found at: {CSV_PATH}")
+        st.stop()
+    csv_mtime = CSV_PATH.stat().st_mtime
+    df_all = load_csv_local(str(CSV_PATH), csv_mtime)
+    meta = load_meta_local(str(META_PATH), META_PATH.stat().st_mtime) if META_PATH.exists() else {}
+else:
+    # Use ETag/Last-Modified to bust cache when GitHub updates the file
+    cache_key = _etag_or_last_modified(RAW_CSV_URL)
+    df_all = load_csv_from_github(RAW_CSV_URL, cache_key)
+    meta = load_meta_from_github(RAW_META_URL, _etag_or_last_modified(RAW_META_URL))
 
-# Guard: CSV must exist
-if not CSV_PATH.exists():
-    st.error(
-        "Data file not found. Run your updater once (e.g., `python Hello.py`), "
-        "or let your GitHub Action populate `data/bls_timeseries.csv`."
-    )
+# show last updated if available
+if meta:
+    st.caption(f"Last updated (UTC): {meta.get('last_updated_utc', 'unknown')}")
+
+# guard
+if df_all.empty:
+    st.error("The CSV loaded successfully but contains no rows.")
     st.stop()
 
 # ───────────────────────────────────────────────────────────
 # Sidebar – cache control + filters
 # ───────────────────────────────────────────────────────────
-# Manual cache clear + rerun
 if st.sidebar.button("🔄 Reload data"):
     st.cache_data.clear()
     st.experimental_rerun()
 
 section = st.sidebar.multiselect("Sections", SECTIONS, default=SECTIONS)
-eligible = [sid for sid, meta in SERIES.items() if meta["section"] in section]
+eligible = [sid for sid, m in SERIES.items() if m["section"] in section]
 
-# Load with cache-busting by CSV modification time
-csv_mtime = CSV_PATH.stat().st_mtime
-df_all = load_data(str(CSV_PATH), csv_mtime)
-
-# Year slider bounds from the data (so 2025 appears if present)
-if df_all.empty:
-    st.error("CSV is present but contains no rows.")
-    st.stop()
-
+# Compute year bounds *from the data* so 2025 appears if present
 min_year = int(df_all["date"].dt.year.min())
 max_year = int(df_all["date"].dt.year.max())
 
@@ -131,20 +175,14 @@ pick = st.sidebar.multiselect(
     default=eligible,
     format_func=lambda sid: f"{SERIES[sid]['section']} — {SERIES[sid]['name']}",
 )
-
 year_min, year_max = st.sidebar.slider(
     "Year range", min_value=min_year, max_value=max_year, value=(min_year, max_year)
 )
 
 # ───────────────────────────────────────────────────────────
-# Load, filter, and show coverage
+# Filter + coverage
 # ───────────────────────────────────────────────────────────
-df = df_all.copy()
-if pick:
-    df = df[df["series_id"].isin(pick)]
-else:
-    df = df.iloc[0:0]  # nothing selected → empty but valid
-
+df = df_all[df_all["series_id"].isin(pick)] if pick else df_all.iloc[0:0]
 df = df[(df["date"].dt.year >= year_min) & (df["date"].dt.year <= year_max)]
 
 st.subheader("Data coverage")
@@ -158,21 +196,22 @@ else:
         .reset_index()
     )
     coverage["series_name"] = coverage["series_id"].map(lambda sid: SERIES.get(sid, {}).get("name", sid))
-    coverage = coverage[["series_id", "series_name", "min", "max", "count"]]
-    st.caption(
-        f"Rows: {len(df):,} • Min date: {df['date'].min().date()} • Max date: {df['date'].max().date()}"
-    )
-    st.dataframe(coverage, use_container_width=True)
+    st.caption(f"Rows: {len(df):,} • Min date: {df['date'].min().date()} • Max date: {df['date'].max().date()}")
+    st.dataframe(coverage[["series_id", "series_name", "min", "max", "count"]], use_container_width=True)
 
 # Downloads
 c1, c2 = st.columns(2)
 with c1:
-    st.download_button(
-        "⬇️ Download full CSV",
-        CSV_PATH.read_bytes(),
-        file_name="bls_timeseries.csv",
-        mime="text/csv",
-    )
+    if USE_LOCAL:
+        st.download_button("⬇️ Download full CSV", Path(CSV_PATH).read_bytes(), file_name="bls_timeseries.csv", mime="text/csv")
+    else:
+        # Download from GitHub raw
+        try:
+            raw_bytes = requests.get(RAW_CSV_URL, timeout=20).content
+            st.download_button("⬇️ Download full CSV", raw_bytes, file_name="bls_timeseries.csv", mime="text/csv")
+        except Exception:
+            st.info("Could not fetch CSV bytes for download button (network).")
+
 with c2:
     st.download_button(
         "⬇️ Download filtered CSV",
@@ -188,7 +227,6 @@ for sec in SECTIONS:
     sub_ids = [sid for sid in pick if sid in SERIES and SERIES[sid]["section"] == sec]
     if not sub_ids:
         continue
-
     st.subheader(sec)
     for sid in sub_ids:
         name = SERIES[sid]["name"]
@@ -201,7 +239,7 @@ for sec in SECTIONS:
         fig.update_traces(mode="lines+markers", hovertemplate="%{x|%Y-%m} — %{y:.2f}")
         st.plotly_chart(fig, use_container_width=True)
 
-        # YoY chart for select level series
+        # YoY chart for level series where it makes sense
         if sid in {"CUUR0000SA0", "CES0500000003"} or sid.endswith("I"):
             yoy = yoy_from_level(df_all, sid).dropna()
             yoy = yoy[(yoy["date"].dt.year >= year_min) & (yoy["date"].dt.year <= year_max)]
@@ -214,7 +252,7 @@ for sec in SECTIONS:
                 st.plotly_chart(fig2, use_container_width=True)
 
 st.write("---")
-st.caption(
-    f"Data path: `{CSV_PATH}` • CPI is NSA • Productivity is Q/Q % • "
-    "ECI shows official YoY (A series); include the I series to compute YoY from the index if desired."
-)
+if USE_LOCAL:
+    st.caption(f"Reading from local: `{CSV_PATH}`")
+else:
+    st.caption(f"Reading from GitHub raw: `{RAW_CSV_URL}`")
