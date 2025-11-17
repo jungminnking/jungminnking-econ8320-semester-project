@@ -34,16 +34,16 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Fetching
 def bls_timeseries(series_ids: List[str], start_year: int, end_year: int) -> Dict[str, Any]:
+    """Fetch multiple BLS time series in one API call."""
     payload = {"seriesid": series_ids, "startyear": str(start_year), "endyear": str(end_year)}
     key = os.getenv("BLS_API_KEY")
     if key:
         payload["registrationkey"] = key
     r = requests.post(BLS_URL, json=payload, timeout=60)
-    if r.status_code != 200:
-        raise BLSError(f"HTTP {r.status_code}: {r.text[:200]}")
+    r.raise_for_status() 
     data = r.json()
     if data.get("status") != "REQUEST_SUCCEEDED":
-        raise BLSError(f"BLS error: {json.dumps(data)[:300]}")
+        raise RuntimeError(f"BLS API error: {json.dumps(data)[:300]}")
     return data
 
 # Parsing 
@@ -85,31 +85,17 @@ def union_and_dedupe(df_old: pd.DataFrame, df_new: pd.DataFrame) -> pd.DataFrame
 # Main
 def run_full_or_incremental() -> pd.DataFrame:
     df_old = load_existing()
-    if df_old.empty:
-        start = START_YEAR
-    else:
-        last_date = df_old["date"].max()
-        start = max(START_YEAR, (last_date - pd.DateOffset(months=24)).year)
-
     series_ids = [sid for sid, *_ in SERIES]
-    api = bls_timeseries(series_ids, start, END_YEAR)
+    api = bls_timeseries(series_ids, START_YEAR, END_YEAR)
     rows = [r for s in api["Results"]["series"] for r in series_payload_to_rows(s)]
     df_new = pd.DataFrame(rows)
     df_out = union_and_dedupe(df_old, df_new)
-
+    allowed = set(series_ids)
+    df_out = df_out[df_out["series_id"].isin(allowed)].sort_values(["series_id", "date"]).reset_index(drop=True)
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(CSV_PATH, index=False)
     META_PATH.write_text(json.dumps({"last_updated_utc": datetime.now(timezone.utc).isoformat()}, indent=2))
-
-    print(f"✅ Saved {len(df_out):,} rows to {CSV_PATH.resolve()}")
-    print("\nCoverage:")
-    print(df_out.groupby("series_id")["date"].agg(["min", "max", "count"]))
-    print("\nNext steps:")
-    print(f"  cd \"{REPO_DIR}\"")
-    print("  git add data/bls_timeseries.csv data/meta.json")
-    print("  git commit -m \"Update BLS data\"")
-    print("  git push")
     return df_out
-
+    
 if __name__ == "__main__":
     run_full_or_incremental()
