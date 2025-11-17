@@ -7,16 +7,15 @@ st.set_page_config(page_title="US Economy Dashboard", layout="wide")
 st.title("US Economy Dashboard")
 st.caption("Semester Project for Econ 8320")
 
-
 # CSV loading 
-csv_url = "https://github.com/jungminnking/jungminnking-econ8320-semester-project/raw/main/data/bls_timeseries.csv"
-df_all = load_data(csv_url)
-
 @st.cache_data(show_spinner=False)
 def load_data(url: str) -> pd.DataFrame:
     df = pd.read_csv(url, parse_dates=["date"])
     df["series_id"] = df["series_id"].astype("string")
     return df
+    
+csv_url = "https://github.com/jungminnking/jungminnking-econ8320-semester-project/raw/main/data/bls_timeseries.csv"
+df_all = load_data(csv_url)
 
 # Series
 series = {
@@ -32,9 +31,9 @@ series = {
 sections = ["Employment", "Productivity", "Price Index", "Compensation"]
 
 # Sidebar
-min = int(df_all["date"].dt.year.min())
-max = int(df_all["date"].dt.year.max())
-year_min, year_max = st.sidebar.slider("Year range", min_value=min, max_value=max, value=(min_year, max_year))
+min_year = int(df_all["date"].dt.year.min())
+max_year = int(df_all["date"].dt.year.max())
+year_min, year_max = st.sidebar.slider("Year range", min_value=min_year, max_value=max_year, value=(min_year, max_year))
 
 # Summary 
 df = df_all[(df_all["date"].dt.year >= year_min) & (df_all["date"].dt.year <= year_max)]
@@ -62,7 +61,7 @@ st.dataframe(coverage, use_container_width=True)
 
 # Download filtered CSV
 st.download_button(
-    "⬇️ Download filtered CSV",
+    "⬇️ Download CSV",
     df.to_csv(index=False).encode("utf-8"),
     file_name="bls_timeseries_filtered.csv",
     mime="text/csv",
@@ -87,6 +86,5 @@ for sec, tab in zip(sections, tabs):
             st.plotly_chart(fig, use_container_width=True)
 
 # Footer
-# ───────────────────────────────────────────────────────────
 st.write("---")
 st.caption(f"Reading data directly from: {csv_url}")
