@@ -23,7 +23,7 @@ SERIES = [
     ("CES0500000002", "Employment", "Avg Weekly Hours, Total Private (SA)", "M"),
     ("CES0500000003", "Employment", "Avg Hourly Earnings, Total Private ($, SA)", "M"),
     ("PRS85006092", "Productivity", "Output per Hour — Nonfarm Business (Q/Q %)", "Q"),
-    ("CUUR0000SA0", "Price Index", "CPI-U All Items (NSA, 1982–84=100)", "M"),
+    ("CUUR0000SA0", "Price Index", "CPI-U All Items (NSA, Basis: 1982–84)", "M"),
     ("CIU1010000000000A", "Compensation", "ECI — Total Compensation, Private (12m % change, NSA)", "Q"),
 ]
 
