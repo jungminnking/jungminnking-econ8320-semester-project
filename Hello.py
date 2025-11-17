@@ -1,4 +1,4 @@
- %run "C:/Users/jungm/Documents/GitHub/jungminnking-econ8320-semester-project/Hello.py"
+# %run "C:/Users/jungm/Documents/GitHub/jungminnking-econ8320-semester-project/Hello.py"
 # Imports
 import os                         # Read environment variables (e.g., BLS_API_KEY)
 import json                       # Read/write meta.json (a simple timestamp file)

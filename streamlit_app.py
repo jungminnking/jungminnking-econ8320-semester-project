@@ -1,5 +1,4 @@
 # streamlit_app.py — US Labor Dashboard (reads CSV written by Hello.py)
-
 import json
 from pathlib import Path
 from datetime import datetime
@@ -8,9 +7,9 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 # Page & Paths
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 st.set_page_config(page_title="US Labor Dashboard", page_icon="📊", layout="wide")
 st.title("US Labor Dashboard")
 st.caption("Auto-updating BLS dashboard (Econ 8320 project)")
@@ -21,15 +20,14 @@ try:
 except NameError:
     BASE_DIR = Path.cwd()
 
-# Allow override via Streamlit secrets; accept both string and Path-like
-_secrets_dir = st.secrets.get("LABOR_DASH_DATA_DIR", str(BASE_DIR / "data"))
-DATA_DIR = Path(_secrets_dir)
+# Allow override via Streamlit secrets (string or Path are OK)
+DATA_DIR = Path(st.secrets.get("LABOR_DASH_DATA_DIR", str(BASE_DIR / "data")))
 CSV_PATH = DATA_DIR / "bls_timeseries.csv"
 META_PATH = DATA_DIR / "meta.json"
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 # Series Catalog (must match updater script)
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 SERIES = {
     # Employment — monthly, SA
     "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
@@ -38,7 +36,7 @@ SERIES = {
     "CES0500000002": {"section": "Employment", "name": "Avg Weekly Hours, Total Private (SA)", "freq": "M"},
     "CES0500000003": {"section": "Employment", "name": "Avg Hourly Earnings, Total Private ($, SA)", "freq": "M"},
 
-    # Productivity — quarterly, SA
+    # Productivity — quarterly, SA  (ensure this ID matches your updater)
     "PRS85006093": {"section": "Productivity", "name": "Output per Hour — Nonfarm Business (Q/Q %)", "freq": "Q"},
 
     # Price Index — monthly, NSA
@@ -46,14 +44,14 @@ SERIES = {
 
     # Compensation — quarterly, NSA
     "CIU1010000000000A": {"section": "Compensation", "name": "ECI — Total Compensation, Private (12m % change, NSA)", "freq": "Q"},
-    # If you also save the index series, uncomment this:
+    # If you also save the index series, you can include it and get YoY from level:
     # "CIU1010000000000I": {"section": "Compensation", "name": "ECI — Total Compensation, Private (Index, NSA)", "freq": "Q"},
 }
 SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
 
-# ---------------------------------------------------------------------
-# Caching with cache-busting by file mtime
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
+# Cache-busted loader (keys cache by file mtime)
+# ───────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_data(csv_path_str: str, csv_mtime: float) -> pd.DataFrame:
     """
@@ -79,9 +77,9 @@ def yoy_from_level(df: pd.DataFrame, sid: str) -> pd.DataFrame:
     d["series_id"] = sid
     return d
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 # About / Meta
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 with st.expander("About & rubric alignment", expanded=False):
     st.markdown(
         "- Data is fetched by **Hello.py** (locally or via GitHub Actions) and saved to `data/`.\n"
@@ -104,10 +102,10 @@ if not CSV_PATH.exists():
     )
     st.stop()
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 # Sidebar – cache control + filters
-# ---------------------------------------------------------------------
-# Manual reload button
+# ───────────────────────────────────────────────────────────
+# Manual cache clear + rerun
 if st.sidebar.button("🔄 Reload data"):
     st.cache_data.clear()
     st.experimental_rerun()
@@ -115,11 +113,11 @@ if st.sidebar.button("🔄 Reload data"):
 section = st.sidebar.multiselect("Sections", SECTIONS, default=SECTIONS)
 eligible = [sid for sid, meta in SERIES.items() if meta["section"] in section]
 
-# Load data (cache keyed by mtime)
+# Load with cache-busting by CSV modification time
 csv_mtime = CSV_PATH.stat().st_mtime
 df_all = load_data(str(CSV_PATH), csv_mtime)
 
-# Compute slider bounds from the data itself
+# Year slider bounds from the data (so 2025 appears if present)
 if df_all.empty:
     st.error("CSV is present but contains no rows.")
     st.stop()
@@ -135,21 +133,17 @@ pick = st.sidebar.multiselect(
 )
 
 year_min, year_max = st.sidebar.slider(
-    "Year range",
-    min_value=min_year,
-    max_value=max_year,
-    value=(min_year, max_year),
+    "Year range", min_value=min_year, max_value=max_year, value=(min_year, max_year)
 )
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 # Load, filter, and show coverage
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 df = df_all.copy()
 if pick:
     df = df[df["series_id"].isin(pick)]
 else:
-    # If nothing selected, show nothing but keep the app running
-    df = df.iloc[0:0]
+    df = df.iloc[0:0]  # nothing selected → empty but valid
 
 df = df[(df["date"].dt.year >= year_min) & (df["date"].dt.year <= year_max)]
 
@@ -187,16 +181,15 @@ with c2:
         mime="text/csv",
     )
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 # Charts
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────
 for sec in SECTIONS:
     sub_ids = [sid for sid in pick if sid in SERIES and SERIES[sid]["section"] == sec]
     if not sub_ids:
         continue
 
     st.subheader(sec)
-
     for sid in sub_ids:
         name = SERIES[sid]["name"]
         d = df[df.series_id == sid].sort_values("date")
