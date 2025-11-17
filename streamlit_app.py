@@ -45,7 +45,7 @@ coverage = (df.groupby("series_id")["date"]
 )
 
 coverage["series_name"] = coverage["series_id"].map(lambda sid: series.get(sid, {}).get("name", sid))
-coverage["coverage_year"] = (coverage["min"].dt.strftime("%Y-%m-%d") + "–" + coverage["max"].dt.strftime("%Y-%m-%d"))
+coverage["coverage_year"] = (coverage["min"].dt.strftime("%m.%d.%Y") + " - " + coverage["max"].dt.strftime("%m.%d.%Y"))
 
 coverage = coverage.rename(columns={
     "series_name": "Economic Indicator",
@@ -80,9 +80,12 @@ for sec, tab in zip(sections, tabs):
                 continue
             fig = px.line(d, x="date", y="value", title=name, labels={"value": "Value", "date": "Year"},)
             fig.update_traces(mode="lines", hovertemplate="%{x|%Y-%m} — %{y:.2f}")
-            start_date = pd.Timestamp("2006-01-01") - pd.DateOffset(months=3)  
+            start_date = pd.Timestamp("2006-01-01")
             end_date = d["date"].max() + pd.DateOffset(months=3)               
-            fig.update_layout(xaxis=dict(range=[start_date, end_date],title="Year", tickformat="%Y", showgrid=True, zeroline=False,), yaxis=dict(showgrid=True, zeroline=False), margin=dict(l=40, r=40, t=60, b=40),)
+            fig.update_layout(xaxis=dict(range=[start_date, end_date],title="Year", tickformat="%Y", showgrid=True, zeroline=False,
+            ), 
+            yaxis=dict(showgrid=True, zeroline=False),
+            margin=dict(l=40, r=40, t=60, b=40),)
             st.plotly_chart(fig, use_container_width=True)
 
 # Footer
