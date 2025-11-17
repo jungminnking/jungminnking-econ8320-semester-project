@@ -96,6 +96,15 @@ def run_full_or_incremental() -> pd.DataFrame:
     df_out.to_csv(CSV_PATH, index=False)
     META_PATH.write_text(json.dumps({"last_updated_utc": datetime.now(timezone.utc).isoformat()}, indent=2))
     return df_out
-    
+
 if __name__ == "__main__":
-    run_full_or_incremental()
+    df_out = run_full_or_incremental()
+
+    print(f"✅ Saved {len(df_out):,} rows to {CSV_PATH.resolve()}")
+    print("\nCoverage:")
+    print(df_out.groupby("series_id")["date"].agg(["min", "max", "count"]))
+    print("\nNext steps:")
+    print(f'  cd "{REPO_DIR}"')
+    print("  git add data/bls_timeseries.csv data/meta.json")
+    print('  git commit -m "Update BLS data"')
+    print("  git push")
