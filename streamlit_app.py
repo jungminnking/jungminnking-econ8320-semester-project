@@ -5,7 +5,7 @@ import plotly.express as px
 # Title
 st.set_page_config(page_title="US Economy Dashboard", layout="wide")
 st.title("US Economy Dashboard")
-st.caption("Semester Project for Econ 8320")
+st.caption("Semester Project for Econ8320 Written by Jungmin Hwang")
 
 # CSV loading 
 @st.cache_data(show_spinner=False)
