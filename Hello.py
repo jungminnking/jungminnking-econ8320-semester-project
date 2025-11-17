@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Dict, List, Any
 import requests
 import pandas as pd
-
 # API
 BLS_URL: str = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 START_YEAR: int = 2006
@@ -96,10 +95,8 @@ def run_full_or_incremental() -> pd.DataFrame:
     df_out.to_csv(CSV_PATH, index=False)
     META_PATH.write_text(json.dumps({"last_updated_utc": datetime.now(timezone.utc).isoformat()}, indent=2))
     return df_out
-
 if __name__ == "__main__":
     df_out = run_full_or_incremental()
 
     print(f"✅ Saved {len(df_out):,} rows to {CSV_PATH.resolve()}")
     print("\nCoverage:")
-    print(df_out.groupby("series_id")["date"].agg(["min", "max", "count"]))
