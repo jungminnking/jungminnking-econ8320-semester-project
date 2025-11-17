@@ -1,4 +1,4 @@
-# streamlit_app.py — Simplified US Labor Dashboard
+# streamlit_app.py — US Labor Dashboard (original data only; no derived series)
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -8,13 +8,11 @@ import plotly.express as px
 # ───────────────────────────────────────────────────────────
 st.set_page_config(page_title="US Labor Dashboard", page_icon="📊", layout="wide")
 st.title("US Labor Dashboard")
-st.caption("Auto-updating BLS dashboard (Econ 8320 project)")
+st.caption("BLS dashboard — original source data only (no derived series)")
 
 # ───────────────────────────────────────────────────────────
 # Simple data read (GitHub only)
 # ───────────────────────────────────────────────────────────
-st.caption("Data source: GitHub raw CSV")
-
 CSV_URL = "https://github.com/jungminnking/jungminnking-econ8320-semester-project/raw/main/data/bls_timeseries.csv"
 
 @st.cache_data(show_spinner=False)
@@ -25,12 +23,13 @@ def load_data(url: str) -> pd.DataFrame:
 
 df_all = load_data(CSV_URL)
 
+# Guard
 if df_all.empty:
     st.error("The CSV loaded successfully but contains no rows.")
     st.stop()
 
 # ───────────────────────────────────────────────────────────
-# Series Catalog
+# Series Catalog (must match your updater)
 # ───────────────────────────────────────────────────────────
 SERIES = {
     "LNS12000000": {"section": "Employment", "name": "Civilian Employment (Thousands, SA)", "freq": "M"},
@@ -45,28 +44,10 @@ SERIES = {
 SECTIONS = ["Employment", "Productivity", "Price Index", "Compensation"]
 
 # ───────────────────────────────────────────────────────────
-# Helper: YoY computation
-# ───────────────────────────────────────────────────────────
-def yoy_from_level(df: pd.DataFrame, sid: str) -> pd.DataFrame:
-    """Compute YoY % for level series. Lag=12 for M, 4 for Q."""
-    freq = SERIES.get(sid, {}).get("freq", "M").upper()
-    lag = 4 if freq.startswith("Q") else 12
-    d = (
-        df[df.series_id == sid][["date", "value"]]
-        .sort_values("date")
-        .set_index("date")
-        .copy()
-    )
-    d["YoY %"] = d["value"].pct_change(lag) * 100.0
-    d = d.reset_index()
-    d["series_id"] = sid
-    return d
-
-# ───────────────────────────────────────────────────────────
 # Sidebar filters
 # ───────────────────────────────────────────────────────────
 section = st.sidebar.multiselect("Sections", SECTIONS, default=SECTIONS)
-eligible = [sid for sid, m in SERIES.items() if m["section"] in section]
+eligible = [sid for sid, meta in SERIES.items() if meta["section"] in section]
 
 min_year = int(df_all["date"].dt.year.min())
 max_year = int(df_all["date"].dt.year.max())
@@ -83,7 +64,7 @@ year_min, year_max = st.sidebar.slider(
 )
 
 # ───────────────────────────────────────────────────────────
-# Filter + coverage
+# Filter + coverage (original rows only)
 # ───────────────────────────────────────────────────────────
 df = df_all[df_all["series_id"].isin(pick)] if pick else df_all.iloc[0:0]
 df = df[(df["date"].dt.year >= year_min) & (df["date"].dt.year <= year_max)]
@@ -102,8 +83,16 @@ else:
     st.caption(f"Rows: {len(df):,} • Min date: {df['date'].min().date()} • Max date: {df['date'].max().date()}")
     st.dataframe(coverage[["series_id", "series_name", "min", "max", "count"]], use_container_width=True)
 
+# Optional: download filtered CSV (still original rows, just filtered)
+st.download_button(
+    "⬇️ Download filtered CSV",
+    df.to_csv(index=False).encode("utf-8"),
+    file_name="bls_timeseries_filtered.csv",
+    mime="text/csv",
+)
+
 # ───────────────────────────────────────────────────────────
-# Tabs for each section
+# Charts (tabs by section) — original series only
 # ───────────────────────────────────────────────────────────
 active_sections = section or SECTIONS
 tabs = st.tabs(active_sections)
@@ -124,25 +113,16 @@ for sec in active_sections:
             if d.empty:
                 continue
 
-            # Level chart
-            fig = px.line(d, x="date", y="value", title=name, labels={"value": "Value", "date": "Date"})
+            # Single chart per original series (no derived YoY/metrics)
+            fig = px.line(
+                d, x="date", y="value", title=name,
+                labels={"value": "Value", "date": "Date"}
+            )
             fig.update_traces(mode="lines+markers", hovertemplate="%{x|%Y-%m} — %{y:.2f}")
             st.plotly_chart(fig, use_container_width=True)
-
-            # YoY chart for level series
-            if sid in {"CUUR0000SA0", "CES0500000003"} or sid.endswith("I"):
-                yoy = yoy_from_level(df_all, sid).dropna()
-                yoy = yoy[(yoy["date"].dt.year >= year_min) & (yoy["date"].dt.year <= year_max)]
-                if not yoy.empty:
-                    fig2 = px.line(
-                        yoy, x="date", y="YoY %", title=f"{name} — YoY %",
-                        labels={"date": "Date", "YoY %": "YoY %"}
-                    )
-                    fig2.update_traces(mode="lines+markers", hovertemplate="%{x|%Y-%m} — %{y:.2f}%")
-                    st.plotly_chart(fig2, use_container_width=True)
 
 # ───────────────────────────────────────────────────────────
 # Footer
 # ───────────────────────────────────────────────────────────
 st.write("---")
-st.caption(f"Reading from GitHub raw: `{CSV_URL}`")
+st.caption(f"Reading original source CSV from: {CSV_URL}")
